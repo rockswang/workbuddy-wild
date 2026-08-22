@@ -38,8 +38,14 @@ input, select, button { font: inherit; color: inherit; }
 .block { width: 100%; }
 .grow { flex: 1; min-width: 0; }
 
-/* 头部 */
-.header { display: flex; align-items: center; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+/* 头部：设为 WebView2 无边框窗口的可拖拽区域（用户可按住拖走面板）；
+   内部可点击控件需显式声明 no-drag，否则无法响应点击。 */
+.header {
+  display: flex; align-items: center; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+  cursor: grab;
+}
+.header .icon-btn, .header input, .header select { -webkit-app-region: no-drag; }
 .logo {
   width: 24px; height: 24px; border-radius: 6px; flex: none;
   object-fit: contain; display: block;

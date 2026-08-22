@@ -24,7 +24,7 @@
 
 1. **下载**：从 [Releases](https://github.com/rockswang/workbuddy-wild/releases) 下载最新版 `workbuddy-wild-windows-amd64.zip`，解压后双击 `workbuddy-wild.exe`
 2. 稍等片刻会弹出提示框，显示 **OpenAI 兼容 API 地址**（默认 `http://127.0.0.1:7863`）——记住它，关掉即可
-3. 右下角出现绿色 W 托盘图标，**单击 / 双击 / 右击** 都能打开管理面板
+3. 右下角出现绿色 W 托盘图标，**单击 / 双击** 直接打开管理面板，**右击**弹出托盘菜单（打开面板 / 退出）
 4. **添加账号**：面板点"＋ 添加账号"→ 选择 WorkBuddy 或 TraeWork → 自动打开无痕浏览器 → 登录对应平台 → 自动写入凭证并立即签到
 5. **配置客户端**：把你的 AI 客户端指向
    ```

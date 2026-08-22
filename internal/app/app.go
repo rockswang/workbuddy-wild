@@ -30,7 +30,7 @@ import (
 )
 
 // Version 面板展示的版本号。
-const Version = "0.2.2"
+const Version = "0.3.0"
 
 const (
 	loginTimeout   = 5 * time.Minute
@@ -288,21 +288,30 @@ func (a *App) OnShutdown(ctx context.Context) {
 	a.Close()
 }
 
-// panelRect 计算面板最终位置（贴主任务栏/工作区右下角，右、下留 12px 间隙）。
+// panelGap 面板与屏幕边缘（及任务栏）的间隙。
+const panelGap = 12
+
+// panelRect 计算面板最终位置（贴主任务栏/工作区右下角）。
 // 高度随账号数量自适应：0 账号基础高度 500，每 +1 账号增高 55（账号卡片实测约 55px），
 // 最多 4 个封顶（列表内部滚动）。退出按钮用 margin-top:auto 贴底，无需精确高度。
+//
+// 返回 (x, y) 为面板左上角<物理像素>坐标（喂给 WindowSetPosition，其原样加到物理工作区左上角），
+// (pw, ph) 为 DIP 尺寸（喂给 WindowSetSize，其内部按 DPI 放大回物理）。二者单位不同，
+// 若用同一批坐标喂给两个 API，在缩放显示屏上窗口物理尺寸会被放大而位置不变，导致右下角越界。
 func (a *App) panelRect() (x, y, pw, ph int) {
-	pw = 270
-	n := a.totalAccounts()
-	ph = 500 + minInt(n, 4)*55
-	_, _, waW, waH := winutil.WorkArea()
-	if int(waW) < pw {
-		pw = int(waW)
+	sc, logW, logH := a.dpiScale()
+	if sc <= 0 || logW <= 0 || logH <= 0 {
+		sc = 1 // 拿不到 DPI 时退化为 1:1，仍做屏幕内钳制
 	}
-	if int(waH) < ph {
-		ph = int(waH)
+	scrW, scrH := winutil.ScreenSize() // 原生物理像素
+	waX, waY, waW, waH := winutil.WorkArea()
+	tbX, tbY, tbW, tbH, ok := winutil.TaskbarRect()
+	if !ok {
+		tbX, tbY, tbW, tbH = 0, 0, 0, 0
 	}
-	x, y = winutil.PanelAnchor(pw, ph)
+	pw, ph = 270, 500+minInt(a.totalAccounts(), 4)*55
+	x, y, pw, ph = winutil.AnchorPanel(int(waX), int(waY), int(waW), int(waH),
+		int(tbX), int(tbY), int(tbW), int(tbH), sc, int(scrW), int(scrH), pw, ph, panelGap)
 	return x, y, pw, ph
 }
 
@@ -311,6 +320,38 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// dpiScale 返回 (DPI 缩放系数 sc, 主屏逻辑宽, 主屏逻辑高)。
+// sc = 物理像素 ÷ DIP = Screen.Width ÷ Screen.Size.Width：
+// wails 的 Screen.Width/Height 来自 EnumDisplayMonitors 的 RECT，是<物理像素>；
+// Screen.Size 经 ScaleToDefaultDPI 换算，才是逻辑 DIP。取二者比值恰好得到 DPI 系数
+// （125% 缩放下 sc=1.25），供 AnchorPanel 统一把 DIP 尺寸换算到物理坐标。
+func (a *App) dpiScale() (float64, int, int) {
+	if a.ctx == nil {
+		return 0, 0, 0
+	}
+	screens, err := runtime.ScreenGetAll(a.ctx)
+	if err != nil || len(screens) == 0 {
+		return 0, 0, 0
+	}
+	var s runtime.Screen
+	found := false
+	for _, sc := range screens {
+		if sc.IsPrimary {
+			s = sc
+			found = true
+			break
+		}
+	}
+	if !found && len(screens) > 0 {
+		s = screens[0]
+	}
+	if s.Width <= 0 || s.Size.Width <= 0 {
+		return 0, 0, 0
+	}
+	sc := float64(s.Width) / float64(s.Size.Width)
+	return sc, s.Size.Width, s.Size.Height
 }
 
 // positionPanel 把面板定位到右下角（贴任务栏），尺寸按账号数自适应。

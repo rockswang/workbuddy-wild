@@ -4,6 +4,7 @@ package winutil
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,11 +26,15 @@ var (
 	procSetForegroundWindow  = user32.NewProc("SetForegroundWindow")
 	procBringWindowToTop     = user32.NewProc("BringWindowToTop")
 	procGetWindowRect        = user32.NewProc("GetWindowRect")
+	procGetSystemMetrics     = user32.NewProc("GetSystemMetrics")
 )
 
 const (
 	spiGetWorkArea = 0x0030
 	wsExToolWindow = 0x00000080
+
+	smCXScreen = 0
+	smCYScreen = 1
 )
 
 // gwlExStyle GWL_EXSTYLE 索引；负数，需运行时转换，故用 var。
@@ -40,6 +45,110 @@ func WorkArea() (int32, int32, int32, int32) {
 	var rect struct{ Left, Top, Right, Bottom int32 }
 	procSystemParametersInfo.Call(uintptr(spiGetWorkArea), 0, uintptr(unsafe.Pointer(&rect)), 0)
 	return rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top
+}
+
+// ScreenSize 返回主显示器完整分辨率（含任务栏区域）的 (w, h)，单位与 WorkArea 一致。
+func ScreenSize() (int32, int32) {
+	w, _, _ := procGetSystemMetrics.Call(uintptr(smCXScreen))
+	h, _, _ := procGetSystemMetrics.Call(uintptr(smCYScreen))
+	return int32(w), int32(h)
+}
+
+// pixelRect 物理像素矩形。
+type pixelRect struct{ X, Y, W, H int }
+
+// AnchorPanel 计算面板到任务栏/工作区右下角的锚点位置，并做屏幕内钳制。
+//
+// 坐标系说明（重要）：Wails 在 Windows 上的窗口 API 使用两套不一致的坐标——
+//   - WindowSetSize 内部会按 DPI 把 DIP（逻辑像素）乘系数放大成物理像素；
+//   - WindowSetPosition 则是把传入值“原样”加到物理坐标的工作区左上角，绝不缩放。
+//
+// 因此本函数以原生物理像素为统一基准计算位置（左下角 0,0 对应屏幕左上角），
+// 面板目标尺寸按 DIP（sc）给出，返回面板左上角物理坐标 (x,y) 与 DIP 尺寸 (cwDip,chDip)，
+// 供调用方分别喂给 WindowSetPosition（物理）与 WindowSetSize（DIP）。
+//
+// 参数：wa*/tb* 为物理像素的原生工作区与任务栏矩形（tb 全 0 表示未探测到任务栏）；
+// sc 为 DPI 缩放系数（物理像素 = DIP × sc，如 125% 缩放时 sc=1.25）；scrW/scrH 为物理像素的
+// 主屏尺寸（用于钳制）；pwDip/phDip 为期望面板 DIP 尺寸；gapDip 为边距（DIP）。
+func AnchorPanel(waX, waY, waW, waH, tbX, tbY, tbW, tbH int, sc float64, scrW, scrH, pwDip, phDip, gapDip int) (x, y, cwDip, chDip int) {
+	if sc <= 0 || scrW <= 0 || scrH <= 0 {
+		sc = 1
+		if scrW <= 0 {
+			scrW = waW
+		}
+		if scrH <= 0 {
+			scrH = waH
+		}
+	}
+	round := func(v float64) int { return int(math.Round(v)) }
+
+	// DIP → 物理：尺寸与边距
+	pw := round(float64(pwDip) * sc)
+	ph := round(float64(phDip) * sc)
+	gap := round(float64(gapDip) * sc)
+
+	// 尺寸钳制（先不超过工作区，再不超过屏幕）
+	if pw > waW {
+		pw = waW
+	}
+	if ph > waH {
+		ph = waH
+	}
+	if pw > scrW {
+		pw = scrW
+	}
+	if ph > scrH {
+		ph = scrH
+	}
+
+	// 默认锚定：工作区右下角
+	x = waX + waW - pw - gap
+	y = waY + waH - ph - gap
+
+	if tbW > 0 && tbH > 0 {
+		if tbW > tbH {
+			// 水平任务栏（顶部/底部）
+			x = waX + waW - pw - gap
+			if tbY <= waY+waH/2 { // 顶部
+				y = tbY + tbH + gap
+			} else { // 底部
+				y = tbY - ph - gap
+			}
+		} else {
+			// 垂直任务栏（左侧/右侧）
+			y = waY + waH - ph - gap
+			if tbX <= waX+waW/2 { // 左侧
+				x = tbX + tbW + gap
+			} else { // 右侧
+				x = tbX - pw - gap
+			}
+		}
+	}
+
+	// 位置钳制进屏幕（物理）：绝不越出右下角
+	if x < 0 {
+		x = 0
+	}
+	if y < 0 {
+		y = 0
+	}
+	if scrW > 0 && x+pw > scrW-gap {
+		x = scrW - pw - gap
+	}
+	if scrH > 0 && y+ph > scrH-gap {
+		y = scrH - ph - gap
+	}
+	if x < 0 {
+		x = 0
+	}
+	if y < 0 {
+		y = 0
+	}
+
+	// 尺寸回 DIP，供 WindowSetSize（其内部会再放大 sc 倍回物理）
+	cwDip = round(float64(pw) / sc)
+	chDip = round(float64(ph) / sc)
+	return x, y, cwDip, chDip
 }
 
 // MainWindow 返回 wails 主窗口句柄（类名 wailsWindow）。
@@ -84,31 +193,8 @@ func InfoBox(title, msg string) {
 	InfoBoxEx(title, msg, 0x40 /* MB_ICONINFORMATION */)
 }
 
-// PanelAnchor 计算右下角弹出面板的位置：贴任务栏（避免被较宽/自动隐藏的任务栏遮挡），
-// 右、下各留 gap 间隙。任务栏探测失败时退回工作区右下角。
-func PanelAnchor(panelW, panelH int) (int, int) {
-	const gap = 12
-	waX, waY, waW, waH := WorkArea()
-	x, y, w, h := int(waX), int(waY), int(waW), int(waH)
-	if tbx, tby, tbw, tbh, ok := taskbarRect(); ok && tbw > 0 && tbh > 0 {
-		if int(tbw) > int(tbh) {
-			// 水平任务栏（顶部或底部）
-			if int(tby) <= y+h/2 { // 顶部
-				return x + w - panelW - gap, int(tby) + int(tbh) + gap
-			}
-			return x + w - panelW - gap, int(tby) - panelH - gap
-		}
-		// 垂直任务栏（左侧或右侧）
-		if int(tbx) <= x+w/2 { // 左侧
-			return int(tbx) + int(tbw) + gap, y + h - panelH - gap
-		}
-		return int(tbx) - panelW - gap, y + h - panelH - gap
-	}
-	return x + w - panelW - gap, y + h - panelH - gap
-}
-
-// taskbarRect 获取主任务栏（Shell_TrayWnd）屏幕矩形。
-func taskbarRect() (x, y, w, h int32, ok bool) {
+// TaskbarRect 获取主任务栏（Shell_TrayWnd）屏幕矩形（原生物理像素）。
+func TaskbarRect() (x, y, w, h int32, ok bool) {
 	cls, _ := syscall.UTF16PtrFromString("Shell_TrayWnd")
 	hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(cls)), 0)
 	if hwnd == 0 {
